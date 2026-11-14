@@ -26,7 +26,7 @@ If the user says "I'm not talking in this," you're in action mode. If they say "
 ## Tooling (use only the fastest path)
 
 - **Whisper:** `whisper --model tiny.en --word_timestamps True --output_format json` (≈10× faster than `small.en`; quality fine for English). For non-English: `--model base` (drop `--language`).
-- **ffmpeg:** add `-hwaccel videotoolbox` for decode and `-preset ultrafast` for renders. Use `-c:v libx264 -crf 20` for the final master.
+- **ffmpeg:** add `$HWACCEL` for decode (VideoToolbox on macOS, `auto` on Windows, nothing on Linux; set by `env.sh`) and `-preset ultrafast` for renders. Use `-c:v libx264 -crf 20` for the final master.
 - **Numpy** for audio alignment (FFT cross-correlation). No scipy/cv2 needed.
 - **Scripts:** `<skill-dir>/scripts/` (where `<skill-dir>` is the directory containing this SKILL.md — typically `~/.claude/skills/clipify/`)
   - `analyze.py` — speaker timeline from two ROI motion files
@@ -34,8 +34,25 @@ If the user says "I'm not talking in this," you're in action mode. If they say "
   - `build_ass.py` — opus-style ASS captions from whisper JSON
   - `audio_align.py` — find offset of a sub-clip in a longer source
   - `detect_transients.py` — find sharp impact sounds (action mode); see `--help`
+  - `env.sh` — per-platform setup (macOS / Windows / Linux), see below
 
-Working dir: `/tmp/clipify/` (mkdir at start, leave artifacts for debugging).
+## Platform setup (macOS, Windows, Linux)
+
+**Start every shell command with `source <skill-dir>/scripts/env.sh && ...`.** Shell variables don't survive between tool calls, so source it each time. It sets:
+
+| Variable | macOS | Windows (Git Bash) | Linux |
+|---|---|---|---|
+| `$PY` | `python3` | `python` | `python3` |
+| `$WHISPER` | `whisper` (or `$PY -m whisper` if not on PATH) | same | same |
+| `$HWACCEL` | `-hwaccel videotoolbox` | `-hwaccel auto` | *(empty)* |
+| `$WORK` | `/tmp/clipify` | `%LOCALAPPDATA%/Temp/clipify` (as `C:/...`) | `/tmp/clipify` |
+| `$OPEN` | `open` | `start` | `xdg-open` |
+
+…and then `cd "$WORK"`. All commands below use **relative file names inside `$WORK`**. Keep it that way: on Windows, absolute paths like `C:/...` break ffmpeg filter arguments (`subtitles=`, `metadata=...:file=`) because of the drive-letter colon.
+
+On Windows, Claude Code's Bash tool is Git Bash, so the bash snippets below work as written. `<skill-dir>` is `~/.claude/skills/clipify` there too (= `%USERPROFILE%\.claude\skills\clipify`). Quote video paths: `VIDEO="C:/Users/me/Videos/talk.mp4"` (forward slashes are safest).
+
+Working dir: `$WORK` (leave artifacts there for debugging).
 
 ---
 
@@ -44,9 +61,9 @@ Working dir: `/tmp/clipify/` (mkdir at start, leave artifacts for debugging).
 ### Step 1A — Find dialogue moments (dialogue mode)
 
 ```bash
-mkdir -p /tmp/clipify
-ffmpeg -y -hwaccel videotoolbox -i "$VIDEO" -vn -ac 1 -ar 16000 /tmp/clipify/audio.wav
-whisper /tmp/clipify/audio.wav --model tiny.en --word_timestamps True --output_format json --output_dir /tmp/clipify --language en
+source <skill-dir>/scripts/env.sh
+ffmpeg -y $HWACCEL -i "$VIDEO" -vn -ac 1 -ar 16000 audio.wav
+$WHISPER audio.wav --model tiny.en --word_timestamps True --output_format json --output_dir . --language en
 ```
 
 Read the resulting JSON (or `.txt`) and pick 3–5 candidate clips. Funny signals to scan for:
@@ -64,9 +81,10 @@ For each candidate, propose: `[start, end, why-it's-funny, suggested title]`. Ai
 Replace Whisper with audio-transient detection. The detector finds sharp impacts (axe-on-wood, fist-on-pad, drumhead, ball-on-bat, wood landing on a pile) by computing spectral flux on the 1–6 kHz band — the broadband impulse an impact creates that ambient/wind doesn't.
 
 ```bash
-ffmpeg -y -hwaccel videotoolbox -i "$VIDEO" -vn -ac 1 -ar 16000 /tmp/clipify/audio.wav
-python3 <skill-dir>/scripts/detect_transients.py /tmp/clipify/audio.wav \
-  --min-flux 30 --min-gap 0.6 > /tmp/clipify/strikes.json
+source <skill-dir>/scripts/env.sh
+ffmpeg -y $HWACCEL -i "$VIDEO" -vn -ac 1 -ar 16000 audio.wav
+$PY <skill-dir>/scripts/detect_transients.py audio.wav \
+  --min-flux 30 --min-gap 0.6 > strikes.json
 ```
 
 Tuning:
@@ -83,10 +101,11 @@ Each "shot" should start ~0.4s before the strike (showing wind-up) and end ~0.5s
 **Always do this before rendering**, in either mode. Audio detection finds the *sound* of an event; the camera might not have captured it. Skipping this is the #1 way to get user feedback like "you cut on chops where I'm not even visible."
 
 ```bash
+source <skill-dir>/scripts/env.sh
 # Sample one frame at each candidate strike time T:
 for T in $STRIKE_TIMES; do
   ffmpeg -y -ss "$T" -i "$VIDEO" -frames:v 1 -vf scale=320:-1 \
-    /tmp/clipify/verify_${T}.jpg
+    verify_${T}.jpg
 done
 ```
 
@@ -101,7 +120,8 @@ For ~30 candidates this is one fast `ffmpeg` call each plus a single batch image
 ### Step 2 — Trim each chosen clip
 
 ```bash
-ffmpeg -y -ss "$START" -t "$DURATION" -i "$VIDEO" -c copy /tmp/clipify/clip_$N.mp4
+source <skill-dir>/scripts/env.sh
+ffmpeg -y -ss "$START" -t "$DURATION" -i "$VIDEO" -c copy clip_$N.mp4
 ```
 
 (Use `-c copy` for instant trim. Re-encode only if cuts must be frame-accurate.)
@@ -120,7 +140,7 @@ Skip the question if there's only one face (single-talker clip). For single-talk
 
 #### Step 4a — Pan-between-faces (recommended for fast-cut talking-head dialogue)
 
-1. **Locate the two face ROIs.** Sample one frame: `ffmpeg -ss <middle> -i <clip> -frames:v 1 /tmp/clipify/probe.jpg`. Read it. Eyeball each face's mouth+chin area as `x,y,w,h` in the source's pixel space. (No cv2 needed — camera is static within a clip; one frame is enough.) Verify by drawing boxes:
+1. **Locate the two face ROIs.** Sample one frame: `ffmpeg -ss <middle> -i <clip> -frames:v 1 probe.jpg` (inside `$WORK`). Read it. Eyeball each face's mouth+chin area as `x,y,w,h` in the source's pixel space. (No cv2 needed — camera is static within a clip; one frame is enough.) Verify by drawing boxes:
 
    ```bash
    ffmpeg -i probe.jpg -vf "drawbox=x=$LX:y=$LY:w=$LW:h=$LH:color=cyan@0.9:t=4,drawbox=x=$RX:y=$RY:w=$RW:h=$RH:color=magenta@0.9:t=4" verify.jpg
@@ -131,17 +151,19 @@ Skip the question if there's only one face (single-talker clip). For single-talk
 2. **Extract per-frame motion energy in each ROI:**
 
    ```bash
+   source <skill-dir>/scripts/env.sh
    ffmpeg -y -i clip.mp4 -filter_complex "
    [0:v]split=2[a][b];
-   [a]crop=$LW:$LH:$LX:$LY,format=gray,tblend=all_mode=difference,signalstats,metadata=mode=print:key=lavfi.signalstats.YAVG:file=/tmp/clipify/L.txt[la];
-   [b]crop=$RW:$RH:$RX:$RY,format=gray,tblend=all_mode=difference,signalstats,metadata=mode=print:key=lavfi.signalstats.YAVG:file=/tmp/clipify/R.txt[ra]
+   [a]crop=$LW:$LH:$LX:$LY,format=gray,tblend=all_mode=difference,signalstats,metadata=mode=print:key=lavfi.signalstats.YAVG:file=L.txt[la];
+   [b]crop=$RW:$RH:$RX:$RY,format=gray,tblend=all_mode=difference,signalstats,metadata=mode=print:key=lavfi.signalstats.YAVG:file=R.txt[ra]
    " -map "[la]" -f null - -map "[ra]" -f null -
    ```
 
 3. **Build speaker timeline** (min dwell 1.0s — short interjections merge into the prior speaker):
 
    ```bash
-   python3 <skill-dir>/scripts/analyze.py /tmp/clipify/L.txt /tmp/clipify/R.txt 1.0 > /tmp/clipify/segments.json
+   source <skill-dir>/scripts/env.sh
+   $PY <skill-dir>/scripts/analyze.py L.txt R.txt 1.0 > segments.json
    ```
 
 4. **Pick pan x-coordinates** for a 9:16 vertical strip from the source. With source W=1920 and target W=1080, crop strip width = 608.
@@ -151,11 +173,12 @@ Skip the question if there's only one face (single-talker clip). For single-talk
 5. **Generate the hard-cut x expression and render:**
 
    ```bash
-   EXPR=$(python3 <skill-dir>/scripts/build_pan.py /tmp/clipify/segments.json $LEFT_X $RIGHT_X)
-   ffmpeg -y -hwaccel videotoolbox -i clip.mp4 -filter_complex \
+   source <skill-dir>/scripts/env.sh
+   EXPR=$($PY <skill-dir>/scripts/build_pan.py segments.json $LEFT_X $RIGHT_X)
+   ffmpeg -y $HWACCEL -i clip.mp4 -filter_complex \
      "[0:v]crop=608:1080:x='$EXPR':y=0,scale=1080:1920:flags=lanczos[v]" \
      -map "[v]" -map 0:a -c:v libx264 -preset fast -crf 20 -pix_fmt yuv420p \
-     -c:a aac -b:a 192k /tmp/clipify/clip_panned.mp4
+     -c:a aac -b:a 192k clip_panned.mp4
    ```
 
    Source 1920×1080 assumed; for 4K source either downscale first or double all coordinates.
@@ -180,12 +203,13 @@ Build `<RIGHT_SPEAKER_ENABLE>` from `segments.json` as `between(t,a,b)+between(t
 When the user wants a slow scenic / pan / reveal shot tightened ("cut this in half") without losing the arc, speed-ramp instead of trimming. Trimming forces you to drop part of the arc; speed-ramping preserves all the beats at higher tempo.
 
 ```bash
+source <skill-dir>/scripts/env.sh
 # 2x speed: 12s arc → 6s output, audio pitch preserved via atempo
 ffmpeg -y -ss "$START" -i "$CLIP" -t "$ORIG_DUR" \
   -vf "setpts=PTS/2,scale=1080:1920:flags=lanczos,fps=30" \
   -af "atempo=2.0" \
   -c:v libx264 -preset fast -crf 21 -pix_fmt yuv420p \
-  -c:a aac -b:a 128k /tmp/clipify/clip_2x.mp4
+  -c:a aac -b:a 128k clip_2x.mp4
 ```
 
 Rules of thumb:
@@ -203,7 +227,7 @@ Skip this step in action mode — the strike sounds are the rhythm and captions 
 
 Ask once (only if user hasn't already specified a style):
 
-> "Three subtitle styles: **opus** (big bold white, yellow active-word highlight), **karaoke** (4-word chunks, green highlight), **minimal** (clean Helvetica, no highlight). Or paste an example you like."
+> "Three subtitle styles: **opus** (big bold white, yellow active-word highlight), **karaoke** (4-word chunks, green highlight), **minimal** (clean Helvetica on macOS / Arial on Windows, no highlight). Or paste an example you like."
 
 If they paste a reference image/example: match the font, size, weight, color, position, and animation as closely as possible — write a custom ASS by hand or extend `build_ass.py`.
 
@@ -211,14 +235,17 @@ Else use the preset:
 
 ```bash
 # Re-run whisper on the trimmed clip for accurate timestamps relative to clip start
-whisper /tmp/clipify/clip_panned.mp4 --model tiny.en --word_timestamps True --output_format json --output_dir /tmp/clipify --language en
-python3 <skill-dir>/scripts/build_ass.py /tmp/clipify/clip_panned.json /tmp/clipify/captions.ass opus
+source <skill-dir>/scripts/env.sh
+$WHISPER clip_panned.mp4 --model tiny.en --word_timestamps True --output_format json --output_dir . --language en
+$PY <skill-dir>/scripts/build_ass.py clip_panned.json captions.ass opus
 ```
 
 Burn captions:
 
 ```bash
-ffmpeg -y -i /tmp/clipify/clip_panned.mp4 -vf "subtitles=/tmp/clipify/captions.ass" \
+source <skill-dir>/scripts/env.sh
+# Keep the .ass path relative: "subtitles=C:/..." fails on Windows (colon is a filter separator).
+ffmpeg -y -i clip_panned.mp4 -vf "subtitles=captions.ass" \
   -c:v libx264 -preset fast -crf 20 -c:a copy "$OUTPUT.mp4"
 ```
 
@@ -226,7 +253,7 @@ ffmpeg -y -i /tmp/clipify/clip_panned.mp4 -vf "subtitles=/tmp/clipify/captions.a
 
 - Save each output to `<source_dir>/clipify_out/` (mkdir if missing)
 - Print one line per clip: name, duration, what was funny, output path
-- Open the first output with `open <path>` so the user can check it
+- Open the first output with `$OPEN <path>` so the user can check it (`open` on macOS, `start "" "<path>"` on Windows, `xdg-open` on Linux)
 - Offer to iterate (different style, different ROI, swap to split-screen, retime captions)
 
 ---
@@ -241,4 +268,7 @@ ffmpeg -y -i /tmp/clipify/clip_panned.mp4 -vf "subtitles=/tmp/clipify/captions.a
 - **Source resolution matters.** If source is 4K, either downscale to 1920×1080 first (faster, fine for 9:16 output) or multiply all ROI/pan coordinates by 2.
 - **Burned-in subtitles in source.** Some "raw" clips still have subtitles. If so, find the no-subs master via audio cross-correlation (`audio_align.py`) and trim from there.
 - **Don't run whisper on the full feature-length source if a short clip suffices.** Whisper the trimmed clip after Step 2; only whisper the full source in Step 1 if you need a transcript to find funny moments.
+- **Windows: `python3` may be a Store stub.** If `python3` opens the Microsoft Store or prints nothing, use `python` (that's what `env.sh` does). If `whisper` is "command not found", `$WHISPER` falls back to `python -m whisper`.
+- **Windows: no absolute paths inside ffmpeg filters.** `subtitles=C:/...` and `metadata=...:file=C:/...` break on the drive-letter colon. Work from `$WORK` with relative names.
+- **Windows: `subtitles` filter needs libass.** The gyan.dev "full" build (`winget install Gyan.FFmpeg`) has it; "essentials" builds also do. If ffmpeg says `No such filter: 'subtitles'`, install a full build.
 - **State the plan in one line, then act.** Don't narrate every iteration.
