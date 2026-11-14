@@ -10,7 +10,7 @@ Point it at any video file and it will:
 2. **Create a 9:16 clip** — cuts your chosen moment, then reframes 16:9 → 9:16 with hard-cut pans that follow whoever is speaking (or split-screen if you'd rather see both faces).
 3. **Add subtitles** — burns opus-style word-by-word captions (big bold white, yellow active-word highlight).
 
-No cloud APIs. Runs entirely on your machine. No OpenCV. ~20s of work for a 20s clip on Apple Silicon.
+No cloud APIs. Runs entirely on your machine. No OpenCV. ~20s of work for a 20s clip on Apple Silicon. Works on macOS, Windows and Linux.
 
 ## Why this exists
 
@@ -18,15 +18,59 @@ Most "auto-clip" tools are either expensive SaaS, slow, or produce slop. This sk
 
 ## Requirements
 
-- macOS (uses VideoToolbox for hardware-accelerated decode — works on Linux/Windows if you remove `-hwaccel videotoolbox` flags)
+- macOS, Windows 10/11 or Linux. `scripts/env.sh` picks the right settings per platform (VideoToolbox decode on macOS, `-hwaccel auto` on Windows, `python` vs `python3`, temp folder).
 - [Claude Code](https://claude.com/claude-code)
-- `ffmpeg` with `libx264` (`brew install ffmpeg`)
+- `ffmpeg` with `libx264` and `libass`
 - [`whisper`](https://github.com/openai/whisper) (`pip install openai-whisper`)
 - Python 3 with `numpy` (`pip install numpy`)
 
 ## Install
 
+### macOS
+
 ```bash
+brew install ffmpeg
+pip3 install openai-whisper numpy
+git clone https://github.com/louisedesadeleer/clipify.git ~/.claude/skills/clipify
+```
+
+### Windows
+
+Open **PowerShell** and run:
+
+```powershell
+# 1. Tools (skip what you already have). Close and reopen PowerShell afterwards so PATH updates.
+winget install --id Git.Git -e
+winget install --id Python.Python.3.12 -e
+winget install --id Gyan.FFmpeg -e
+
+# 2. Python packages
+python -m pip install --upgrade pip
+python -m pip install openai-whisper numpy
+
+# 3. The skill
+git clone https://github.com/louisedesadeleer/clipify.git "$env:USERPROFILE\.claude\skills\clipify"
+```
+
+Check it works:
+
+```powershell
+ffmpeg -version
+python -m whisper --help
+```
+
+Notes for Windows:
+
+- Claude Code on Windows runs shell commands through **Git Bash**, which is why Git is required. The skill's commands are written for that shell.
+- If `python` opens the Microsoft Store, turn off the `python.exe` / `python3.exe` entries under *Settings → Apps → Advanced app settings → App execution aliases*, then reopen PowerShell.
+- Whisper uses PyTorch. The default `pip` install runs on the CPU, which is fine with the `tiny.en` model. For an NVIDIA GPU, install the CUDA build of PyTorch first (see [pytorch.org](https://pytorch.org/get-started/locally/)).
+- Clips are written next to your source video in `clipify_out\`; scratch files go to `%LOCALAPPDATA%\Temp\clipify`.
+
+### Linux
+
+```bash
+sudo apt install ffmpeg git python3-pip   # or your distro's equivalent
+pip3 install openai-whisper numpy
 git clone https://github.com/louisedesadeleer/clipify.git ~/.claude/skills/clipify
 ```
 
@@ -72,7 +116,9 @@ clipify/
 │   ├── analyze.py     # speaker timeline from two ROI motion files
 │   ├── build_pan.py   # ffmpeg crop x-expression with hard cuts
 │   ├── build_ass.py   # opus/karaoke/minimal ASS captions from whisper JSON
-│   └── audio_align.py # find offset of a sub-clip in a longer source
+│   ├── audio_align.py # find offset of a sub-clip in a longer source
+│   ├── detect_transients.py # find impact sounds for action montages
+│   └── env.sh         # per-platform setup (macOS / Windows / Linux)
 └── README.md
 ```
 

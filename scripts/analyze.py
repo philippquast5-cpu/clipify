@@ -9,7 +9,7 @@ import re, json, sys
 def parse(path):
     times, vals = [], []
     cur_t = None
-    with open(path) as f:
+    with open(path, encoding="utf-8", errors="replace") as f:
         for line in f:
             m = re.match(r"frame:\d+\s+pts:\d+\s+pts_time:([0-9.]+)", line)
             if m:
